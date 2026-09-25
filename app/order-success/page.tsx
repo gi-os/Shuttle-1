@@ -3,6 +3,7 @@
 import { useEffect, useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
+import { DEFAULT_PRICING, formatMoneyAscii, type PricingSettings } from '@/lib/money';
 
 interface DesignData {
   colors: {
@@ -26,6 +27,7 @@ interface OrderItem {
   boxCost: number;
   unitsPerBox: number;
   quantity: number;
+  attachment?: { filename: string };
 }
 
 interface LastOrder {
@@ -35,6 +37,13 @@ interface LastOrder {
   company: string;
   items: OrderItem[];
   total: number;
+  poNumber?: string;
+  brand?: string;
+  needByDate?: string;
+  estimatedBudget?: string;
+  artworkLink?: string;
+  billingAddress?: string;
+  pricing?: PricingSettings;
 }
 
 function sanitize(str: string): string {
@@ -47,6 +56,7 @@ function generateReceiptPDF(order: LastOrder, companyName: string): Blob {
   const M = 50;
   let y = H - M;
   let stream = '';
+  const pricing = order.pricing || DEFAULT_PRICING;
 
   const text = (s: string, x: number, yp: number, size: number, bold = false) => {
     const font = bold ? '/F2' : '/F1';
@@ -81,6 +91,19 @@ function generateReceiptPDF(order: LastOrder, companyName: string): Blob {
     text(`Company:  ${order.company}`, M, y, 10);
     y -= 16;
   }
+  const extraLines: [string, string | undefined][] = [
+    ['PO Number', order.poNumber],
+    ['Brand', order.brand],
+    ['Need-by date', order.needByDate],
+    ['Estimated budget', order.estimatedBudget && `${order.estimatedBudget} ${pricing.currency}`],
+    ['Artwork link', order.artworkLink],
+    ['Billing address', order.billingAddress?.replace(/\n/g, ', ')],
+  ];
+  for (const [label, value] of extraLines) {
+    if (!value) continue;
+    text(`${label}:  ${value.length > 85 ? value.substring(0, 82) + '...' : value}`, M, y, 10);
+    y -= 16;
+  }
   y -= 10;
   line(M, y, W - M, y);
   y -= 20;
@@ -93,8 +116,10 @@ function generateReceiptPDF(order: LastOrder, companyName: string): Blob {
 
   text('Item', colItem, y, 10, true);
   text('Qty', colQty, y, 10, true);
-  text('Price', colPrice, y, 10, true);
-  text('Total', colTotal, y, 10, true);
+  if (!pricing.hidePrices) {
+    text('Price', colPrice, y, 10, true);
+    text('Total', colTotal, y, 10, true);
+  }
   y -= 6;
   line(M, y, W - M, y);
   y -= 16;
@@ -106,18 +131,27 @@ function generateReceiptPDF(order: LastOrder, companyName: string): Blob {
       : item.productName;
     text(name, colItem, y, 10);
     text(`${item.quantity}`, colQty, y, 10);
-    text(`$${item.boxCost.toFixed(2)}`, colPrice, y, 10);
-    text(`$${(item.boxCost * item.quantity).toFixed(2)}`, colTotal, y, 10);
+    if (!pricing.hidePrices) {
+      text(formatMoneyAscii(item.boxCost, pricing.currency), colPrice, y, 10);
+      text(formatMoneyAscii(item.boxCost * item.quantity, pricing.currency), colTotal, y, 10);
+    }
     y -= 14;
     text(`SKU: ${item.sku}  |  ${item.quantity * item.unitsPerBox} units (${item.unitsPerBox}/box)`, colItem + 8, y, 8);
-    y -= 20;
+    y -= 14;
+    if (item.attachment) {
+      text(`Attached: ${item.attachment.filename}`, colItem + 8, y, 8);
+      y -= 14;
+    }
+    y -= 6;
   }
 
   // Total
   line(M, y, W - M, y, 1);
   y -= 22;
-  text('Total:', colPrice, y, 13, true);
-  text(`$${order.total.toFixed(2)}`, colTotal, y, 13, true);
+  if (!pricing.hidePrices) {
+    text('Total:', colPrice, y, 13, true);
+    text(formatMoneyAscii(order.total, pricing.currency), colTotal, y, 13, true);
+  }
   y -= 40;
 
   // Footer

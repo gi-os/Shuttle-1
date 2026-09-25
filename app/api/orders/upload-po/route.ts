@@ -17,20 +17,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate file type - accept PDF, HTML, TXT, and Word documents
-    const allowedTypes = [
-      'application/pdf',
-      'text/html',
-      'text/plain',
-      'application/msword',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    ];
-    const allowedExtensions = ['.pdf', '.html', '.htm', '.txt', '.doc', '.docx'];
+    // Validate file type - accept PDF, TXT, and Word documents.
+    // HTML is rejected: Launchpad serves PO files inline, so an uploaded page could script against admins.
+    const allowedExtensions = ['.pdf', '.txt', '.doc', '.docx'];
     const fileExtension = path.extname(file.name).toLowerCase();
 
-    if (!allowedTypes.includes(file.type) && !allowedExtensions.includes(fileExtension)) {
+    // The saved extension is what Launchpad serves by, so require an allowed extension
+    // (a text/plain MIME type must not smuggle in a .html file)
+    if (!allowedExtensions.includes(fileExtension)) {
       return NextResponse.json(
-        { error: 'Only PDF, HTML, TXT, and Word (.doc/.docx) files are accepted for Purchase Orders' },
+        { error: 'Only PDF, TXT, and Word (.doc/.docx) files are accepted for Purchase Orders' },
         { status: 400 }
       );
     }

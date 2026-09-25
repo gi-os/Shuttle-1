@@ -33,3 +33,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# staged product-page uploads (moved into Orders/ at checkout)
+DATABASE/Orders/.pending-uploads/

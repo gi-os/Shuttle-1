@@ -13,12 +13,25 @@ export interface DataRequired {
   extra_notes: boolean;
   shipping_handler: boolean;
   hotel_list: boolean;
+  // Extended checkout fields (all default false so existing shops are unchanged)
+  brand: boolean;
+  billing_address: boolean;
+  need_by_date: boolean;
+  budget: boolean;
+  artwork_link: boolean;
+}
+
+export interface Pricing {
+  hidePrices: boolean;
+  currency: string; // ISO 4217 code, e.g. "USD", "EUR"
 }
 
 export interface PresetsData {
   shopType: ShopType;
   dataRequired: DataRequired;
   hotelList: string[];
+  brandList: string[];
+  pricing: Pricing;
 }
 
 function parseKeyValueFile(content: string): Record<string, string> {
@@ -75,6 +88,11 @@ export function getDataRequired(): DataRequired {
     extra_notes: true,
     shipping_handler: true,
     hotel_list: false,
+    brand: false,
+    billing_address: false,
+    need_by_date: false,
+    budget: false,
+    artwork_link: false,
   };
 
   try {
@@ -91,6 +109,11 @@ export function getDataRequired(): DataRequired {
       extra_notes: parsed.extra_notes !== 'false',
       shipping_handler: parsed.shipping_handler !== 'false',
       hotel_list: parsed.hotel_list === 'true',
+      brand: parsed.brand === 'true',
+      billing_address: parsed.billing_address === 'true',
+      need_by_date: parsed.need_by_date === 'true',
+      budget: parsed.budget === 'true',
+      artwork_link: parsed.artwork_link === 'true',
     };
   } catch (error) {
     console.error('Error reading data required:', error);
@@ -99,29 +122,77 @@ export function getDataRequired(): DataRequired {
 }
 
 /**
- * Get hotel list from DATABASE/Design/Details/Hotels.txt
- * Returns empty array if file doesn't exist or has no entries.
+ * Read a one-entry-per-line list from DATABASE/Design/Details/<filename>.
+ * Lines starting with # are comments. Returns empty array if the file doesn't exist.
  */
-export function getHotelList(): string[] {
+function readDetailsList(filename: string): string[] {
   try {
-    const hotelsPath = path.join(DESIGN_PATH, 'Details', 'Hotels.txt');
-    if (!fs.existsSync(hotelsPath)) {
+    const listPath = path.join(DESIGN_PATH, 'Details', filename);
+    if (!fs.existsSync(listPath)) {
       return [];
     }
-    const content = fs.readFileSync(hotelsPath, 'utf-8');
-    const hotels: string[] = [];
+    const content = fs.readFileSync(listPath, 'utf-8');
+    const entries: string[] = [];
 
     for (const line of content.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
-      hotels.push(trimmed);
+      entries.push(trimmed);
     }
 
-    return hotels;
+    return entries;
   } catch (error) {
-    console.error('Error reading hotel list:', error);
+    console.error(`Error reading ${filename}:`, error);
     return [];
   }
+}
+
+/**
+ * Get hotel list from DATABASE/Design/Details/Hotels.txt
+ */
+export function getHotelList(): string[] {
+  return readDetailsList('Hotels.txt');
+}
+
+/**
+ * Get brand list from DATABASE/Design/Details/Brands.txt (used when DataRequired brand: true)
+ */
+export function getBrandList(): string[] {
+  return readDetailsList('Brands.txt');
+}
+
+/**
+ * Read the first meaningful line of a Presets/<filename> file, lowercased/trimmed as given.
+ * Accepts either a bare value ("true") or key: value ("hide: true").
+ */
+function readPresetValue(filename: string): string {
+  try {
+    const filePath = path.join(PRESETS_PATH, filename);
+    if (!fs.existsSync(filePath)) return '';
+    for (const line of fs.readFileSync(filePath, 'utf-8').split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const colonIndex = trimmed.indexOf(':');
+      return (colonIndex === -1 ? trimmed : trimmed.substring(colonIndex + 1)).trim();
+    }
+    return '';
+  } catch (error) {
+    console.error(`Error reading ${filename}:`, error);
+    return '';
+  }
+}
+
+/**
+ * Pricing display settings:
+ *   Presets/HidePrices.txt — "true" suppresses every price display (totals are still computed/stored)
+ *   Presets/Currency.txt   — ISO 4217 code (default USD)
+ */
+export function getPricing(): Pricing {
+  const currency = readPresetValue('Currency.txt').toUpperCase();
+  return {
+    hidePrices: readPresetValue('HidePrices.txt').toLowerCase() === 'true',
+    currency: /^[A-Z]{3}$/.test(currency) ? currency : 'USD',
+  };
 }
 
 /**
@@ -132,5 +203,7 @@ export function getPresetsData(): PresetsData {
     shopType: getShopType(),
     dataRequired: getDataRequired(),
     hotelList: getHotelList(),
+    brandList: getBrandList(),
+    pricing: getPricing(),
   };
 }

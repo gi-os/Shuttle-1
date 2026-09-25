@@ -3,6 +3,9 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import FadeImage from '@/components/FadeImage';
+import { formatMoney } from '@/lib/money';
+import VariantChips from '@/components/VariantChips';
+import { dedupeVariantGroups, variantDisplayName } from '@/lib/variants';
 
 type SortOption = 'name-asc' | 'name-desc' | 'price-asc' | 'price-desc' | 'units-asc' | 'units-desc' | 'total-asc' | 'total-desc';
 
@@ -42,7 +45,7 @@ export default function ShopAllPage() {
         });
       });
 
-      setProducts(allProducts);
+      setProducts(dedupeVariantGroups(allProducts));
     }
     loadData();
   }, []);
@@ -121,12 +124,20 @@ export default function ShopAllPage() {
           >
             <option value="name-asc">Name (A-Z)</option>
             <option value="name-desc">Name (Z-A)</option>
-            <option value="price-asc">Price per unit (Low to High)</option>
-            <option value="price-desc">Price per unit (High to Low)</option>
+            {!design.pricing?.hidePrices && (
+              <>
+                <option value="price-asc">Price per unit (Low to High)</option>
+                <option value="price-desc">Price per unit (High to Low)</option>
+              </>
+            )}
             <option value="units-asc">Units per box (Low to High)</option>
             <option value="units-desc">Units per box (High to Low)</option>
-            <option value="total-asc">Box price (Low to High)</option>
-            <option value="total-desc">Box price (High to Low)</option>
+            {!design.pricing?.hidePrices && (
+              <>
+                <option value="total-asc">Box price (Low to High)</option>
+                <option value="total-desc">Box price (High to Low)</option>
+              </>
+            )}
           </select>
         </div>
       </div>
@@ -151,7 +162,7 @@ export default function ShopAllPage() {
                 <div className="aspect-square bg-gray-100 relative border-b" style={{ borderColor: design.colors.border }}>
                   <FadeImage
                     src={product.images[0]}
-                    alt={product.name}
+                    alt={variantDisplayName(product)}
                     className="w-full h-full object-contain p-4"
                   />
                 </div>
@@ -181,8 +192,9 @@ export default function ShopAllPage() {
                     fontFamily: design.fonts.titleFont,
                   }}
                 >
-                  {product.name}
+                  {variantDisplayName(product)}
                 </h3>
+                <VariantChips product={product} design={design} stockMap={stockMap} />
                 <p
                   className="text-xs mb-2 italic"
                   style={{
@@ -211,24 +223,28 @@ export default function ShopAllPage() {
                   >
                     Box of {product.unitsPerBox} units
                   </p>
-                  <p
-                    className="text-2xl font-bold"
-                    style={{
-                      color: design.colors.secondary,
-                      fontFamily: design.fonts.titleFont,
-                    }}
-                  >
-                    ${product.boxCost.toFixed(2)}
-                  </p>
-                  <p
-                    className="text-sm"
-                    style={{
-                      color: design.colors.textLight,
-                      fontFamily: design.fonts.bodyFont,
-                    }}
-                  >
-                    ${product.itemCost.toFixed(2)} per unit
-                  </p>
+                  {!design.pricing?.hidePrices && (
+                    <>
+                      <p
+                        className="text-2xl font-bold"
+                        style={{
+                          color: design.colors.secondary,
+                          fontFamily: design.fonts.titleFont,
+                        }}
+                      >
+                        {formatMoney(product.boxCost, design.pricing?.currency)}
+                      </p>
+                      <p
+                        className="text-sm"
+                        style={{
+                          color: design.colors.textLight,
+                          fontFamily: design.fonts.bodyFont,
+                        }}
+                      >
+                        {formatMoney(product.itemCost, design.pricing?.currency)} per unit
+                      </p>
+                    </>
+                  )}
                 </div>
                 {stock !== null && (
                   <p className="text-xs" style={{ color: isOutOfStock ? '#DC2626' : design.colors.success }}>

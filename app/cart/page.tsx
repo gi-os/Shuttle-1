@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { getCart, updateCartItemQuantity, removeFromCart, type Cart } from '@/lib/cart';
+import { DEFAULT_PRICING, formatMoney, type PricingSettings } from '@/lib/money';
 
 interface DesignData {
   colors: {
@@ -23,6 +24,7 @@ interface DesignData {
   style: {
     cornerRadius: number;
   };
+  pricing?: PricingSettings;
 }
 
 export default function CartPage() {
@@ -89,6 +91,8 @@ export default function CartPage() {
     );
   }
 
+  const pricing = design.pricing || DEFAULT_PRICING;
+
   const hasOutOfStockItems = cart.items.some(item => {
     const stock = stockMap[item.productId];
     return stock !== undefined && stock <= 0;
@@ -138,6 +142,11 @@ export default function CartPage() {
                       <p className="text-sm" style={{ color: design.colors.text, fontFamily: design.fonts.bodyFont }}>
                         Box of {item.unitsPerBox} units
                       </p>
+                      {item.attachment && (
+                        <p className="text-sm mt-1 font-semibold" style={{ color: design.colors.success, fontFamily: design.fonts.bodyFont }}>
+                          Attached: {item.attachment.filename}
+                        </p>
+                      )}
                       {/* Stock status */}
                       {stock !== null && (
                         <p
@@ -205,12 +214,16 @@ export default function CartPage() {
                     </div>
 
                     <div className="text-right">
-                      <p className="text-sm" style={{ color: design.colors.textLight, fontFamily: design.fonts.bodyFont }}>
-                        ${item.boxCost.toFixed(2)} per box
-                      </p>
-                      <p className="text-2xl font-bold" style={{ color: design.colors.secondary, fontFamily: design.fonts.titleFont }}>
-                        ${(item.boxCost * item.quantity).toFixed(2)}
-                      </p>
+                      {!pricing.hidePrices && (
+                        <>
+                          <p className="text-sm" style={{ color: design.colors.textLight, fontFamily: design.fonts.bodyFont }}>
+                            {formatMoney(item.boxCost, pricing.currency)} per box
+                          </p>
+                          <p className="text-2xl font-bold" style={{ color: design.colors.secondary, fontFamily: design.fonts.titleFont }}>
+                            {formatMoney(item.boxCost * item.quantity, pricing.currency)}
+                          </p>
+                        </>
+                      )}
                       <p className="text-sm" style={{ color: design.colors.textLight, fontFamily: design.fonts.bodyFont }}>
                         {item.quantity * item.unitsPerBox} total units
                       </p>
@@ -263,24 +276,28 @@ export default function CartPage() {
                     }}>
                       {item.productName} x {item.quantity}
                     </span>
-                    <span style={{ color: design.colors.text, fontFamily: design.fonts.bodyFont }}>
-                      ${(item.boxCost * item.quantity).toFixed(2)}
-                    </span>
+                    {!pricing.hidePrices && (
+                      <span style={{ color: design.colors.text, fontFamily: design.fonts.bodyFont }}>
+                        {formatMoney(item.boxCost * item.quantity, pricing.currency)}
+                      </span>
+                    )}
                   </div>
                 );
               })}
             </div>
 
-            <div className="border-t pt-4 mb-6" style={{ borderColor: design.colors.border }}>
-              <div className="flex justify-between items-center">
-                <span className="text-xl font-bold" style={{ color: design.colors.primary, fontFamily: design.fonts.titleFont }}>
-                  Total:
-                </span>
-                <span className="text-3xl font-bold" style={{ color: design.colors.secondary, fontFamily: design.fonts.titleFont }}>
-                  ${cart.total.toFixed(2)}
-                </span>
+            {!pricing.hidePrices && (
+              <div className="border-t pt-4 mb-6" style={{ borderColor: design.colors.border }}>
+                <div className="flex justify-between items-center">
+                  <span className="text-xl font-bold" style={{ color: design.colors.primary, fontFamily: design.fonts.titleFont }}>
+                    Total:
+                  </span>
+                  <span className="text-3xl font-bold" style={{ color: design.colors.secondary, fontFamily: design.fonts.titleFont }}>
+                    {formatMoney(cart.total, pricing.currency)}
+                  </span>
+                </div>
               </div>
-            </div>
+            )}
 
             {(hasOutOfStockItems || hasOverStockItems) && (
               <div

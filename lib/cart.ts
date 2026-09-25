@@ -5,6 +5,13 @@ export interface CartItem {
   boxCost: number;
   unitsPerBox: number;
   quantity: number; // number of boxes
+  // Staged file for products with Details/UploadRequired.txt (see /api/uploads/product-pdf)
+  attachment?: CartAttachment;
+}
+
+export interface CartAttachment {
+  uploadId: string;
+  filename: string;
 }
 
 export interface Cart {
@@ -53,12 +60,17 @@ export function addToCart(
   sku: string,
   boxCost: number,
   unitsPerBox: number,
-  quantity: number
+  quantity: number,
+  attachment?: CartAttachment
 ): Cart {
   const cart = getCart();
   const existingItem = cart.items.find(item => item.productId === productId);
 
-  if (existingItem) {
+  if (existingItem && attachment) {
+    // Upload products carry one document per line — re-adding replaces the attachment
+    existingItem.attachment = attachment;
+    existingItem.quantity = quantity;
+  } else if (existingItem) {
     existingItem.quantity += quantity;
   } else {
     cart.items.push({
@@ -68,6 +80,7 @@ export function addToCart(
       boxCost,
       unitsPerBox,
       quantity,
+      ...(attachment ? { attachment } : {}),
     });
   }
 

@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { getCart, clearCart, type Cart } from '@/lib/cart';
+import { DEFAULT_PRICING, formatMoney, type PricingSettings } from '@/lib/money';
 
 interface DesignData {
   colors: {
@@ -32,8 +33,15 @@ interface PresetsData {
     extra_notes: boolean;
     shipping_handler: boolean;
     hotel_list: boolean;
+    brand?: boolean;
+    billing_address?: boolean;
+    need_by_date?: boolean;
+    budget?: boolean;
+    artwork_link?: boolean;
   };
   hotelList: string[];
+  brandList?: string[];
+  pricing?: PricingSettings;
 }
 
 export default function CheckoutPage() {
@@ -73,6 +81,23 @@ export default function CheckoutPage() {
   // STS-2.00 fields - Hotel
   const [hotelSelection, setHotelSelection] = useState('');
 
+  // Extended fields - Order details (DataRequired brand / need_by_date / budget / artwork_link)
+  const [brand, setBrand] = useState('');
+  const [needByDate, setNeedByDate] = useState('');
+  const [estimatedBudget, setEstimatedBudget] = useState('');
+  const [artworkLink, setArtworkLink] = useState('');
+
+  // Extended fields - Billing address (DataRequired billing_address)
+  const [billingSameAsShipping, setBillingSameAsShipping] = useState(true);
+  const [billingAddress, setBillingAddress] = useState('');
+  const [billingApt, setBillingApt] = useState('');
+  const [billingCity, setBillingCity] = useState('');
+  const [billingCountry, setBillingCountry] = useState('');
+  const [billingProvince, setBillingProvince] = useState('');
+  const [billingPostalCode, setBillingPostalCode] = useState('');
+
+  const cartHasAttachment = cart.items.some(item => item.attachment);
+
   useEffect(() => {
     const currentCart = getCart();
     if (currentCart.items.length === 0) {
@@ -103,6 +128,8 @@ export default function CheckoutPage() {
             hotel_list: false,
           },
           hotelList: [],
+          brandList: [],
+          pricing: DEFAULT_PRICING,
         });
       });
   }, [router]);
@@ -124,23 +151,37 @@ export default function CheckoutPage() {
         return;
       }
 
-      // For PO shop type, validate PO fields
+      // For PO shop type, validate PO fields. The PO document is only required here
+      // when the cart does not already carry one from a PO Upload product.
       if (presets?.shopType === 'po') {
-        if (!poNumber) {
+        if (!poNumber.trim()) {
           alert('Please enter a Purchase Order number.');
           setIsSubmitting(false);
           return;
         }
-        if (!poFile) {
-          alert('Please upload a Purchase Order file (PDF, HTML, TXT, or Word).');
+        if (!poFile && !cartHasAttachment) {
+          alert('Please upload a Purchase Order file (PDF, TXT, or Word).');
           setIsSubmitting(false);
           return;
         }
       }
 
-      const shippingAddress = presets?.dataRequired.address
+      const dr = presets?.dataRequired;
+      const shippingAddress = dr?.address
         ? `${firstName} ${lastName}\n${address}${apt ? '\n' + apt : ''}\n${city}, ${province} ${postalCode}\n${country}`
         : '';
+      const billingAddressValue = !dr?.billing_address
+        ? ''
+        : billingSameAsShipping && dr.address
+          ? shippingAddress
+          : `${billingAddress}${billingApt ? '\n' + billingApt : ''}\n${billingCity}, ${billingProvince} ${billingPostalCode}\n${billingCountry}`;
+      const extendedFields = {
+        brand: dr?.brand ? brand : '',
+        billingAddress: billingAddressValue,
+        needByDate: dr?.need_by_date ? needByDate : '',
+        estimatedBudget: dr?.budget ? estimatedBudget : '',
+        artworkLink: dr?.artwork_link ? artworkLink.trim() : '',
+      };
 
       const orderData = {
         name: `${firstName} ${lastName}`,
@@ -158,6 +199,7 @@ export default function CheckoutPage() {
         shopType: presets?.shopType || 'free',
         poNumber: presets?.shopType === 'po' ? poNumber : '',
         hotelSelection: presets?.dataRequired.hotel_list ? hotelSelection : '',
+        ...extendedFields,
       };
 
       const response = await fetch('/api/orders', {
@@ -182,11 +224,16 @@ export default function CheckoutPage() {
       }
 
       if (!response.ok) {
+        if (response.status === 400 && result.error) {
+          alert(result.error);
+          setIsSubmitting(false);
+          return;
+        }
         throw new Error('Failed to submit order');
       }
 
-      // Upload PO file if this is a PO shop
-      if (presets?.shopType === 'po' && poFile) {
+      // Upload PO file if this is a PO shop and the order has no PO Upload product document
+      if (presets?.shopType === 'po' && poFile && !result.poFile) {
         const formData = new FormData();
         formData.append('po_file', poFile);
         formData.append('order_id', result.orderId);
@@ -212,6 +259,8 @@ export default function CheckoutPage() {
         shopType: presets?.shopType || 'free',
         poNumber: presets?.shopType === 'po' ? poNumber : '',
         hotelSelection: presets?.dataRequired.hotel_list ? hotelSelection : '',
+        ...extendedFields,
+        pricing: presets?.pricing || DEFAULT_PRICING,
       }));
 
       // Clear cart
@@ -236,6 +285,16 @@ export default function CheckoutPage() {
   }
 
   const dr = presets.dataRequired;
+  const pricing = presets.pricing || DEFAULT_PRICING;
+  const brandList = presets.brandList || [];
+  const today = new Date().toISOString().split('T')[0];
+  const inputClass = 'w-full px-4 py-2 border focus:outline-none focus:ring-2';
+  const inputStyle = { borderColor: design.colors.border, borderRadius: `${design.style.cornerRadius}px`, fontFamily: design.fonts.bodyFont };
+  const labelClass = 'block text-sm font-semibold mb-2';
+  const labelStyle = { color: design.colors.text, fontFamily: design.fonts.bodyFont };
+  const sectionStyle = { borderColor: design.colors.border, borderRadius: `${design.style.cornerRadius}px` };
+  const headingStyle = { color: design.colors.primary, fontFamily: design.fonts.titleFont };
+  const attachedItems = cart.items.filter(item => item.attachment);
 
   return (
     <div className="container mx-auto px-4 py-12">
@@ -324,6 +383,106 @@ export default function CheckoutPage() {
                 )}
               </div>
             </div>
+
+            {/* Order Details - brand / need-by / budget / artwork link toggles */}
+            {(dr.brand || dr.need_by_date || dr.budget || dr.artwork_link) && (
+              <div className="border p-6" style={sectionStyle}>
+                <h2 className="text-2xl font-bold mb-4" style={headingStyle}>
+                  Order Details
+                </h2>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {dr.brand && (
+                    <div className="md:col-span-2">
+                      <label htmlFor="brand" className={labelClass} style={labelStyle}>
+                        Brand *
+                      </label>
+                      {brandList.length > 0 ? (
+                        <select
+                          id="brand"
+                          required
+                          value={brand}
+                          onChange={(e) => setBrand(e.target.value)}
+                          className={`${inputClass} bg-white`}
+                          style={inputStyle}
+                        >
+                          <option value="">-- Select a brand --</option>
+                          {brandList.map((b) => (
+                            <option key={b} value={b}>
+                              {b}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          id="brand"
+                          type="text"
+                          required
+                          value={brand}
+                          onChange={(e) => setBrand(e.target.value)}
+                          className={inputClass}
+                          style={inputStyle}
+                        />
+                      )}
+                    </div>
+                  )}
+                  {dr.need_by_date && (
+                    <div>
+                      <label htmlFor="need-by-date" className={labelClass} style={labelStyle}>
+                        Need-by date *
+                      </label>
+                      <input
+                        id="need-by-date"
+                        type="date"
+                        required
+                        min={today}
+                        value={needByDate}
+                        onChange={(e) => setNeedByDate(e.target.value)}
+                        className={inputClass}
+                        style={inputStyle}
+                      />
+                    </div>
+                  )}
+                  {dr.budget && (
+                    <div>
+                      <label htmlFor="estimated-budget" className={labelClass} style={labelStyle}>
+                        Estimated budget ({pricing.currency})
+                      </label>
+                      <input
+                        id="estimated-budget"
+                        type="number"
+                        min="0"
+                        step="any"
+                        value={estimatedBudget}
+                        onChange={(e) => setEstimatedBudget(e.target.value)}
+                        className={inputClass}
+                        style={inputStyle}
+                        placeholder="e.g. 5000"
+                      />
+                    </div>
+                  )}
+                  {dr.artwork_link && (
+                    <div className="md:col-span-2">
+                      <label htmlFor="artwork-link" className={labelClass} style={labelStyle}>
+                        Custom artwork link
+                      </label>
+                      <input
+                        id="artwork-link"
+                        type="url"
+                        pattern="https?://.+"
+                        value={artworkLink}
+                        onChange={(e) => setArtworkLink(e.target.value)}
+                        className={inputClass}
+                        style={inputStyle}
+                        placeholder="https://... (Dropbox, WeTransfer, Google Drive, Box)"
+                      />
+                      <p className="text-xs mt-1" style={{ color: design.colors.textLight, fontFamily: design.fonts.bodyFont }}>
+                        Share a link to your artwork files. No file upload needed.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Shipping Address - conditional on address toggle */}
             {dr.address && (
@@ -422,6 +581,57 @@ export default function CheckoutPage() {
               </div>
             )}
 
+            {/* Billing Address - conditional on billing_address toggle */}
+            {dr.billing_address && (
+              <div className="border p-6" style={sectionStyle}>
+                <h2 className="text-2xl font-bold mb-4" style={headingStyle}>
+                  Billing Address
+                </h2>
+                {dr.address && (
+                  <label className="flex items-center gap-2 mb-4 cursor-pointer" style={labelStyle}>
+                    <input
+                      type="checkbox"
+                      checked={billingSameAsShipping}
+                      onChange={(e) => setBillingSameAsShipping(e.target.checked)}
+                    />
+                    <span className="text-sm">Same as shipping address</span>
+                  </label>
+                )}
+                {(!billingSameAsShipping || !dr.address) && (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div className="md:col-span-2">
+                        <label htmlFor="billing-address" className={labelClass} style={labelStyle}>Address</label>
+                        <input id="billing-address" type="text" required value={billingAddress} onChange={(e) => setBillingAddress(e.target.value)} className={inputClass} style={inputStyle} />
+                      </div>
+                      <div>
+                        <label htmlFor="billing-apt" className={labelClass} style={labelStyle}>Apt, suite, etc. (optional)</label>
+                        <input id="billing-apt" type="text" value={billingApt} onChange={(e) => setBillingApt(e.target.value)} className={inputClass} style={inputStyle} />
+                      </div>
+                    </div>
+                    <div>
+                      <label htmlFor="billing-city" className={labelClass} style={labelStyle}>City</label>
+                      <input id="billing-city" type="text" required value={billingCity} onChange={(e) => setBillingCity(e.target.value)} className={inputClass} style={inputStyle} />
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div>
+                        <label htmlFor="billing-country" className={labelClass} style={labelStyle}>Country</label>
+                        <input id="billing-country" type="text" required value={billingCountry} onChange={(e) => setBillingCountry(e.target.value)} className={inputClass} style={inputStyle} />
+                      </div>
+                      <div>
+                        <label htmlFor="billing-province" className={labelClass} style={labelStyle}>State / Region</label>
+                        <input id="billing-province" type="text" value={billingProvince} onChange={(e) => setBillingProvince(e.target.value)} className={inputClass} style={inputStyle} />
+                      </div>
+                      <div>
+                        <label htmlFor="billing-postal" className={labelClass} style={labelStyle}>Postal code</label>
+                        <input id="billing-postal" type="text" required value={billingPostalCode} onChange={(e) => setBillingPostalCode(e.target.value)} className={inputClass} style={inputStyle} />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Hotel Selection - conditional on hotel_list toggle */}
             {dr.hotel_list && (
               <div className="border p-6" style={{ borderColor: design.colors.border, borderRadius: `${design.style.cornerRadius}px` }}>
@@ -483,6 +693,11 @@ export default function CheckoutPage() {
                       placeholder="Enter your Purchase Order number"
                     />
                   </div>
+                  {attachedItems.length > 0 ? (
+                    <div className="text-sm px-3 py-2 rounded" style={{ backgroundColor: `${design.colors.success}15`, color: design.colors.success, fontFamily: design.fonts.bodyFont }}>
+                      PO document attached via {attachedItems.map(item => `${item.productName} (${item.attachment!.filename})`).join(', ')}. No separate upload needed.
+                    </div>
+                  ) : (
                   <div>
                     <label className="block text-sm font-semibold mb-2" style={{ color: design.colors.text, fontFamily: design.fonts.bodyFont }}>
                       Upload PO Document *
@@ -491,16 +706,17 @@ export default function CheckoutPage() {
                       ref={poFileRef}
                       type="file"
                       required
-                      accept=".pdf,.html,.htm,.txt,.doc,.docx,application/pdf,text/html,text/plain,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                      accept=".pdf,.txt,.doc,.docx,application/pdf,text/plain,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                       onChange={(e) => setPoFile(e.target.files?.[0] || null)}
                       className="w-full px-4 py-2 border focus:outline-none focus:ring-2"
                       style={{ borderColor: design.colors.border, borderRadius: `${design.style.cornerRadius}px`, fontFamily: design.fonts.bodyFont }}
                     />
                     <p className="text-xs mt-1" style={{ color: design.colors.textLight, fontFamily: design.fonts.bodyFont }}>
-                      Accepted formats: PDF, HTML, TXT, Word (.doc/.docx)
+                      Accepted formats: PDF, TXT, Word (.doc/.docx)
                     </p>
                   </div>
-                  {poFile && (
+                  )}
+                  {poFile && attachedItems.length === 0 && (
                     <div className="flex items-center gap-2 text-sm px-3 py-2 rounded" style={{ backgroundColor: `${design.colors.success}15`, color: design.colors.success }}>
                       <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -680,9 +896,20 @@ export default function CheckoutPage() {
                     {item.productName}
                   </div>
                   <div className="text-sm flex justify-between" style={{ color: design.colors.textLight, fontFamily: design.fonts.bodyFont }}>
-                    <span>{item.quantity} box{item.quantity > 1 ? 'es' : ''} × ${item.boxCost.toFixed(2)}</span>
-                    <span>${(item.boxCost * item.quantity).toFixed(2)}</span>
+                    {pricing.hidePrices ? (
+                      <span>{item.quantity} box{item.quantity > 1 ? 'es' : ''}</span>
+                    ) : (
+                      <>
+                        <span>{item.quantity} box{item.quantity > 1 ? 'es' : ''} × {formatMoney(item.boxCost, pricing.currency)}</span>
+                        <span>{formatMoney(item.boxCost * item.quantity, pricing.currency)}</span>
+                      </>
+                    )}
                   </div>
+                  {item.attachment && (
+                    <div className="text-xs" style={{ color: design.colors.success, fontFamily: design.fonts.bodyFont }}>
+                      Attached: {item.attachment.filename}
+                    </div>
+                  )}
                   <div className="text-xs" style={{ color: design.colors.textLight, fontFamily: design.fonts.bodyFont }}>
                     {item.quantity * item.unitsPerBox} total units
                   </div>
@@ -690,16 +917,18 @@ export default function CheckoutPage() {
               ))}
             </div>
 
-            <div className="border-t pt-4" style={{ borderColor: design.colors.border }}>
-              <div className="flex justify-between items-center">
-                <span className="text-xl font-bold" style={{ color: design.colors.primary, fontFamily: design.fonts.titleFont }}>
-                  Total:
-                </span>
-                <span className="text-3xl font-bold" style={{ color: design.colors.secondary, fontFamily: design.fonts.titleFont }}>
-                  ${cart.total.toFixed(2)}
-                </span>
+            {!pricing.hidePrices && (
+              <div className="border-t pt-4" style={{ borderColor: design.colors.border }}>
+                <div className="flex justify-between items-center">
+                  <span className="text-xl font-bold" style={{ color: design.colors.primary, fontFamily: design.fonts.titleFont }}>
+                    Total:
+                  </span>
+                  <span className="text-3xl font-bold" style={{ color: design.colors.secondary, fontFamily: design.fonts.titleFont }}>
+                    {formatMoney(cart.total, pricing.currency)}
+                  </span>
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
       </div>

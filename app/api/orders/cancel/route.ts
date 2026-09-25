@@ -2,40 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { restoreStock } from '@/lib/inventory';
+import { parseCSV, serializeCSV } from '@/lib/orders';
 
 const ORDERS_CSV = path.join(process.cwd(), 'DATABASE', 'Orders', 'orders.csv');
 const CANCEL_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
-
-function parseCSVLine(line: string): string[] {
-  const fields: string[] = [];
-  let current = '';
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const char = line[i];
-    if (inQuotes) {
-      if (char === '"' && line[i + 1] === '"') {
-        current += '"';
-        i++;
-      } else if (char === '"') {
-        inQuotes = false;
-      } else {
-        current += char;
-      }
-    } else {
-      if (char === '"') {
-        inQuotes = true;
-      } else if (char === ',') {
-        fields.push(current);
-        current = '';
-      } else {
-        current += char;
-      }
-    }
-  }
-  fields.push(current);
-  return fields;
-}
 
 export async function POST(request: NextRequest) {
   try {
@@ -49,30 +19,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Order not found' }, { status: 404 });
     }
 
-    const content = fs.readFileSync(ORDERS_CSV, 'utf-8');
-    const lines = content.split('\n');
-    const header = lines[0];
+    // Parse the whole file: quoted fields (e.g. shipping addresses) can span several lines
+    const rows = parseCSV(fs.readFileSync(ORDERS_CSV, 'utf-8'));
+    const orderRowIndex = rows.findIndex((r, i) => i > 0 && r[0] === orderId);
 
-    let orderLine: string | null = null;
-    let orderLineIndex = -1;
-
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-
-      const fields = parseCSVLine(line);
-      if (fields[0] === orderId) {
-        orderLine = line;
-        orderLineIndex = i;
-        break;
-      }
-    }
-
-    if (!orderLine || orderLineIndex === -1) {
+    if (orderRowIndex === -1) {
       return NextResponse.json({ error: 'Order not found' }, { status: 404 });
     }
 
-    const fields = parseCSVLine(orderLine);
+    const fields = rows[orderRowIndex];
     const orderDate = new Date(fields[1]);
     const now = new Date();
     const elapsed = now.getTime() - orderDate.getTime();
@@ -106,14 +61,9 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Remove the order line from CSV
-    const newLines = [header];
-    for (let i = 1; i < lines.length; i++) {
-      if (i === orderLineIndex) continue;
-      const line = lines[i].trim();
-      if (line) newLines.push(line);
-    }
-    fs.writeFileSync(ORDERS_CSV, newLines.join('\n') + '\n', 'utf-8');
+    // Remove the order row from CSV
+    rows.splice(orderRowIndex, 1);
+    fs.writeFileSync(ORDERS_CSV, serializeCSV(rows), 'utf-8');
 
     return NextResponse.json({
       success: true,

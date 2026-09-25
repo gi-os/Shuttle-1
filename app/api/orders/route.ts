@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { deductStock, getStockMap } from '@/lib/inventory';
+import { getProduct } from '@/lib/catalog';
+import { getBrandList, getDataRequired, getShopType } from '@/lib/presets';
+import { ORDERS_DIR, parseCSV, resolvePendingUpload, serializeCSV } from '@/lib/orders';
 
 interface OrderItem {
   productId: string;
@@ -10,6 +13,7 @@ interface OrderItem {
   boxCost: number;
   unitsPerBox: number;
   quantity: number;
+  attachment?: { uploadId: string; filename: string };
 }
 
 interface OrderData {
@@ -29,9 +33,18 @@ interface OrderData {
   shopType?: string;
   poNumber?: string;
   hotelSelection?: string;
+  // Extended checkout fields (DataRequired brand / billing_address / need_by_date / budget / artwork_link)
+  brand?: string;
+  billingAddress?: string;
+  needByDate?: string;
+  estimatedBudget?: string;
+  artworkLink?: string;
 }
 
-const CSV_HEADER = 'Order ID,Date,Customer Name,Email,Phone,Company,Shipping Address,Freight Option,Freight Company,Freight Account,Freight Contact,Order Notes,Items,Total,Shop Type,PO Number,PO File,Hotel Selection,Status,Tracking Number';
+// Extended columns are appended after Tracking Number so positional readers of the older layout keep working
+const EXTENDED_COLUMNS = ['Brand', 'Billing Address', 'Need By Date', 'Estimated Budget', 'Artwork Link', 'Attachments'];
+
+const CSV_HEADER = 'Order ID,Date,Customer Name,Email,Phone,Company,Shipping Address,Freight Option,Freight Company,Freight Account,Freight Contact,Order Notes,Items,Total,Shop Type,PO Number,PO File,Hotel Selection,Status,Tracking Number,' + EXTENDED_COLUMNS.join(',');
 
 function generateOrderId(): string {
   const timestamp = Date.now();
@@ -68,27 +81,31 @@ function ensureCSVHeader(ordersPath: string): void {
   const content = fs.readFileSync(ordersPath, 'utf-8');
   const firstLine = content.split('\n')[0] || '';
 
-  // If header already has Status column, nothing to do
-  if (firstLine.includes('Status')) {
+  // If header already has the extended columns, nothing to do
+  if (firstLine.includes('Status') && firstLine.includes('Artwork Link')) {
     return;
   }
 
-  const lines = content.split('\n');
-  const migrated: string[] = [CSV_HEADER];
+  // Parse the whole file — quoted fields (shipping addresses) span several physical lines
+  const headerColumns = CSV_HEADER.split(',');
+  const rows = parseCSV(content);
+  const migrated: string[][] = [headerColumns];
 
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    if (firstLine.includes('Shop Type')) {
-      // Has Shop Type columns but missing Status/Tracking Number — append 2 columns
-      migrated.push(line + ',Pending,');
+  for (const row of rows.slice(1)) {
+    if (firstLine.includes('Status')) {
+      // Has Status/Tracking Number but missing extended columns — padded below
+    } else if (firstLine.includes('Shop Type')) {
+      // Has Shop Type columns but missing Status/Tracking Number
+      row.push('Pending', '');
     } else {
       // Old format — append Shop Type + PO + Hotel + Status + Tracking
-      migrated.push(line + ',free,,,,Pending,');
+      row.push('free', '', '', '', 'Pending', '');
     }
+    while (row.length < headerColumns.length) row.push('');
+    migrated.push(row);
   }
 
-  fs.writeFileSync(ordersPath, migrated.join('\n') + '\n', 'utf-8');
+  fs.writeFileSync(ordersPath, serializeCSV(migrated), 'utf-8');
 }
 
 export async function POST(request: NextRequest) {
@@ -116,6 +133,56 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // PO shops: the PO number is always required (the PO document may come from a PO Upload product instead)
+    const shopType = getShopType();
+    const poNumber = (orderData.poNumber || '').trim();
+    if (shopType === 'po' && !poNumber) {
+      return NextResponse.json(
+        { error: 'Missing required field: poNumber' },
+        { status: 400 }
+      );
+    }
+
+    // Upload-required products must carry a staged, valid PDF
+    const attachmentPaths = new Map<string, string>();
+    for (const item of orderData.items) {
+      const product = getProduct(item.productId);
+      if (!product?.uploadRequired) continue;
+      const stagedPath = resolvePendingUpload(item.attachment?.uploadId);
+      if (!stagedPath) {
+        return NextResponse.json(
+          { error: `${item.productName} requires an attached PDF. Please re-attach it on the product page.` },
+          { status: 400 }
+        );
+      }
+      attachmentPaths.set(item.productId, stagedPath);
+    }
+
+    // Extended checkout fields
+    const dataRequired = getDataRequired();
+    const brand = dataRequired.brand ? (orderData.brand || '').trim() : '';
+    const brandList = getBrandList();
+    if (dataRequired.brand && (!brand || (brandList.length > 0 && !brandList.includes(brand)))) {
+      return NextResponse.json({ error: 'Please select a valid brand' }, { status: 400 });
+    }
+    const needByDate = dataRequired.need_by_date ? (orderData.needByDate || '').trim() : '';
+    if (needByDate && !/^\d{4}-\d{2}-\d{2}$/.test(needByDate)) {
+      return NextResponse.json({ error: 'Need-by date must be YYYY-MM-DD' }, { status: 400 });
+    }
+    const artworkLink = dataRequired.artwork_link ? (orderData.artworkLink || '').trim() : '';
+    if (artworkLink) {
+      let valid = false;
+      try {
+        const url = new URL(artworkLink);
+        valid = url.protocol === 'https:' || url.protocol === 'http:';
+      } catch { /* invalid */ }
+      if (!valid) {
+        return NextResponse.json({ error: 'Artwork link must be an http(s) URL' }, { status: 400 });
+      }
+    }
+    const billingAddress = dataRequired.billing_address ? (orderData.billingAddress || '').trim() : '';
+    const estimatedBudget = dataRequired.budget ? (orderData.estimatedBudget || '').trim() : '';
 
     // Re-validate inventory at checkout time to prevent overselling
     const stockMap = getStockMap();
@@ -145,8 +212,22 @@ export async function POST(request: NextRequest) {
     const orderId = generateOrderId();
     const orderDate = new Date().toISOString();
 
+    // Move staged product PDFs into Orders/ — first one is <OrderID>.pdf so Launchpad's PO lookup finds it
+    const attachmentFiles: string[] = [];
+    const storedItems = orderData.items.map(item => {
+      const stagedPath = attachmentPaths.get(item.productId);
+      if (!stagedPath) {
+        const { attachment: _ignored, ...rest } = item;
+        return rest;
+      }
+      const storedAs = attachmentFiles.length === 0 ? `${orderId}.pdf` : `${orderId}-${attachmentFiles.length + 1}.pdf`;
+      fs.renameSync(stagedPath, path.join(ORDERS_DIR, storedAs));
+      attachmentFiles.push(storedAs);
+      return { ...item, attachment: { filename: item.attachment!.filename, storedAs } };
+    });
+
     // Format items as JSON string for CSV
-    const itemsJson = JSON.stringify(orderData.items);
+    const itemsJson = JSON.stringify(storedItems);
 
     // Prepare freight info
     const freightInfo = orderData.freightOption === 'own'
@@ -154,9 +235,9 @@ export async function POST(request: NextRequest) {
       : orderData.freightOption ? 'LR Paris' : '';
 
     // Determine PO file reference (extension stored after upload completes)
-    const shopType = orderData.shopType || 'free';
-    const poNumber = orderData.poNumber || '';
-    const poFileRef = shopType === 'po' && poNumber ? `${orderId} (see Orders folder)` : '';
+    const poFileRef = attachmentFiles.length > 0
+      ? attachmentFiles[0]
+      : shopType === 'po' && poNumber ? `${orderId} (see Orders folder)` : '';
     const hotelSelection = orderData.hotelSelection || '';
 
     // Create CSV row with new columns
@@ -181,6 +262,12 @@ export async function POST(request: NextRequest) {
       escapeCSVField(hotelSelection),
       'Pending',
       '',
+      escapeCSVField(brand),
+      escapeCSVField(billingAddress),
+      escapeCSVField(needByDate),
+      escapeCSVField(estimatedBudget),
+      escapeCSVField(artworkLink),
+      escapeCSVField(attachmentFiles.join('; ')),
     ].join(',');
 
     // Append to orders.csv
@@ -209,13 +296,40 @@ export async function POST(request: NextRequest) {
       fetch(`${launchpadUrl}/api/shops/${shopSlug}/orders/notify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderData: { orderId, date: orderDate, ...orderData } }),
+        body: JSON.stringify({
+          orderData: {
+            orderId,
+            date: orderDate,
+            ...orderData,
+            items: storedItems,
+            shopType,
+            poNumber,
+            poFile: poFileRef,
+            brand,
+            billingAddress,
+            needByDate,
+            estimatedBudget,
+            artworkLink,
+            attachments: attachmentFiles,
+            // Launchpad's email template renders the "Order Notes" key; fold the extended fields in so they reach the email
+            'Order Notes': [
+              brand && `Brand: ${brand}`,
+              poNumber && `PO Number: ${poNumber}`,
+              needByDate && `Need-by date: ${needByDate}`,
+              estimatedBudget && `Estimated budget: ${estimatedBudget}`,
+              artworkLink && `Artwork link: ${artworkLink}`,
+              billingAddress && `Billing address: ${billingAddress.replace(/\n/g, ', ')}`,
+              orderData.orderNotes && `Notes: ${orderData.orderNotes}`,
+            ].filter(Boolean).join('\n'),
+          },
+        }),
       }).catch(err => console.warn('Launchpad notify failed (non-blocking):', err));
     }
 
     return NextResponse.json({
       success: true,
       orderId,
+      poFile: attachmentFiles[0] || null,
       message: 'Order submitted successfully',
     });
   } catch (error) {

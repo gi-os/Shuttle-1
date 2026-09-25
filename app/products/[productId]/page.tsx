@@ -3,8 +3,15 @@
 import { useState, useEffect, use } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { addToCart } from '@/lib/cart';
+import { addToCart, type CartAttachment } from '@/lib/cart';
+import { DEFAULT_PRICING, formatMoney, type PricingSettings } from '@/lib/money';
 import FadeImage from '@/components/FadeImage';
+
+interface ProductVariant {
+  id: string;
+  name: string;
+  values: string[];
+}
 
 interface Product {
   id: string;
@@ -17,6 +24,11 @@ interface Product {
   images: string[];
   collectionId: string;
   collectionName: string;
+  uploadRequired?: 'pdf';
+  variantGroup?: string;
+  variantDimensions?: string[];
+  variantValues?: string[];
+  variants?: ProductVariant[];
 }
 
 interface DesignData {
@@ -36,6 +48,7 @@ interface DesignData {
     about: string;
     footer: string;
   };
+  pricing?: PricingSettings;
 }
 
 interface InventoryData {
@@ -60,9 +73,12 @@ export default function ProductPage({ params }: { params: Promise<{ productId: s
   const [quantity, setQuantity] = useState(1);
   const [isAdding, setIsAdding] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
+  const [variantStockMap, setVariantStockMap] = useState<Record<string, number>>({});
+  const [attachment, setAttachment] = useState<CartAttachment | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Fetch product, design, and inventory data
     Promise.all([
       fetch(`/api/products/${productId}`).then(r => r.json()),
       fetch('/api/design').then(r => r.json()),
@@ -72,6 +88,19 @@ export default function ProductPage({ params }: { params: Promise<{ productId: s
         setProduct(productData);
         setDesign(designData);
         setInventory(inventoryData);
+        setSelectedImage(0); // reset when product changes (variant navigation)
+
+        // If this product has variants, fetch full inventory to show stock per pill
+        if (productData?.variants?.length > 1) {
+          fetch('/api/inventory')
+            .then(r => r.ok ? r.json() : [])
+            .then((allInventory: Array<{productId: string; stock: number}>) => {
+              const map: Record<string, number> = {};
+              allInventory.forEach(item => { map[item.productId] = item.stock; });
+              setVariantStockMap(map);
+            })
+            .catch(() => {});
+        }
         if (productData && designData) {
           document.title = `${designData.companyName} - ${productData.name}`;
         }
@@ -81,28 +110,71 @@ export default function ProductPage({ params }: { params: Promise<{ productId: s
       });
   }, [productId]);
 
+  const handleAttachFile = async (file: File | null) => {
+    setUploadError(null);
+    setAttachment(null);
+    if (!file) return;
+
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      setUploadError('Please attach a PDF file.');
+      return;
+    }
+
+    setIsUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const response = await fetch('/api/uploads/product-pdf', { method: 'POST', body: formData });
+      const result = await response.json();
+      if (!response.ok) {
+        setUploadError(result.error || 'Upload failed. Please try again.');
+        return;
+      }
+      setAttachment({ uploadId: result.uploadId, filename: result.filename });
+    } catch {
+      setUploadError('Upload failed. Please try again.');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   const handleAddToCart = () => {
     if (!product) return;
-
+    if (product.uploadRequired && !attachment) return;
     setIsAdding(true);
-    addToCart(
-      product.id,
-      product.name,
-      product.sku,
-      product.boxCost,
-      product.unitsPerBox,
-      quantity
-    );
-
-    // Dispatch custom event for cart update
+    addToCart(product.id, product.name, product.sku, product.boxCost, product.unitsPerBox, product.uploadRequired ? 1 : quantity, attachment || undefined);
     window.dispatchEvent(new Event('cartUpdated'));
-
     setShowSuccess(true);
     setIsAdding(false);
+    setTimeout(() => setShowSuccess(false), 3000);
+  };
 
-    setTimeout(() => {
-      setShowSuccess(false);
-    }, 3000);
+  /**
+   * Navigate to the variant that best matches changing one dimension.
+   *
+   * For 2D (Color, Size):
+   *   - Changing Color → keep current Size if the combo exists, else first with new Color
+   *   - Changing Size  → keep current Color if the combo exists, else first with new Size
+   */
+  const handleVariantSelect = (dimensionIndex: number, newValue: string) => {
+    if (!product?.variants || !product.variantValues) return;
+
+    const targetValues = [...product.variantValues];
+    targetValues[dimensionIndex] = newValue;
+
+    // Exact match first
+    let target = product.variants.find(v =>
+      v.values.every((val, i) => val === targetValues[i])
+    );
+
+    // Fall back to any variant with the new value at the right dimension
+    if (!target) {
+      target = product.variants.find(v => v.values[dimensionIndex] === newValue);
+    }
+
+    if (target && target.id !== product.id) {
+      router.push(`/products/${target.id}`);
+    }
   };
 
   if (!product || !design) {
@@ -114,9 +186,37 @@ export default function ProductPage({ params }: { params: Promise<{ productId: s
   }
 
   const totalPrice = product.boxCost * quantity;
+  const pricing = design.pricing || DEFAULT_PRICING;
+  const needsUpload = !!product.uploadRequired;
   const stock = inventory?.stock ?? null;
   const isOutOfStock = stock !== null && stock <= 0;
   const maxQuantity = stock !== null && stock > 0 ? stock : undefined;
+
+  const hasVariants = !!(product.variants && product.variants.length > 1 && product.variantDimensions && product.variantValues);
+
+  /**
+   * Get selectable values for a given dimension.
+   * For dimension 1 (e.g., Size), filter by the currently selected dimension 0 value (e.g., Color)
+   * so only valid combinations are shown.
+   */
+  const getDimensionValues = (dimIndex: number): string[] => {
+    if (!product.variants || !product.variantValues) return [];
+
+    if (dimIndex === 0) {
+      const seen = new Set<string>();
+      return product.variants
+        .map(v => v.values[0])
+        .filter(v => v && !seen.has(v) && seen.add(v) as unknown as boolean);
+    }
+
+    // Filter by the currently-selected value of the previous dimension
+    const currentDim0 = product.variantValues[0];
+    const seen = new Set<string>();
+    return product.variants
+      .filter(v => v.values[0] === currentDim0)
+      .map(v => v.values[dimIndex])
+      .filter(v => v && !seen.has(v) && seen.add(v) as unknown as boolean);
+  };
 
   return (
     <div className="container mx-auto px-4 py-12">
@@ -125,13 +225,7 @@ export default function ProductPage({ params }: { params: Promise<{ productId: s
         className="inline-flex items-center mb-6 hover:opacity-80"
         style={{ color: design.colors.secondary }}
       >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          className="h-5 w-5 mr-2"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-        >
+        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
         </svg>
         {fromShopAll ? 'Back to Shop All' : `Back to ${product.collectionName}`}
@@ -157,15 +251,9 @@ export default function ProductPage({ params }: { params: Promise<{ productId: s
                       key={index}
                       onClick={() => setSelectedImage(index)}
                       className="aspect-square bg-gray-100 rounded-lg overflow-hidden border-2 hover:opacity-80"
-                      style={{
-                        borderColor: index === selectedImage ? design.colors.secondary : design.colors.border,
-                      }}
+                      style={{ borderColor: index === selectedImage ? design.colors.secondary : design.colors.border }}
                     >
-                      <FadeImage
-                        src={image}
-                        alt={`${product.name} ${index + 1}`}
-                        className="w-full h-full object-contain p-1"
-                      />
+                      <FadeImage src={image} alt={`${product.name} ${index + 1}`} className="w-full h-full object-contain p-1" />
                     </button>
                   ))}
                 </div>
@@ -173,19 +261,8 @@ export default function ProductPage({ params }: { params: Promise<{ productId: s
             </>
           ) : (
             <div className="aspect-square bg-gray-100 rounded-lg flex items-center justify-center">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="h-24 w-24 text-gray-300"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
-                />
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-24 w-24 text-gray-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
               </svg>
             </div>
           )}
@@ -193,9 +270,64 @@ export default function ProductPage({ params }: { params: Promise<{ productId: s
 
         {/* Product Details */}
         <div>
+          {/* Show base name for variant groups, full name for standalone products */}
           <h1 className="text-4xl font-bold mb-4" style={{ color: design.colors.primary }}>
-            {product.name}
+            {product.variantGroup || product.name}
           </h1>
+
+          {/* 2-Level Variant Selector */}
+          {hasVariants && (
+            <div className="mb-6 space-y-4">
+              {product.variantDimensions!.map((dimLabel, dimIndex) => {
+                const values = getDimensionValues(dimIndex);
+                const currentValue = product.variantValues![dimIndex];
+
+                return (
+                  <div key={dimLabel}>
+                    <p className="text-sm font-semibold mb-2" style={{ color: design.colors.text }}>
+                      {dimLabel}:{' '}
+                      <span style={{ color: design.colors.secondary }}>{currentValue}</span>
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {values.map(value => {
+                        const isSelected = value === currentValue;
+
+                        // Find the target variant this pill would navigate to
+                        const targetValues = [...product.variantValues!];
+                        targetValues[dimIndex] = value;
+                        const targetVariant =
+                          product.variants!.find(v => v.values.every((val, i) => val === targetValues[i])) ||
+                          product.variants!.find(v => v.values[dimIndex] === value);
+                        const targetStock = targetVariant ? variantStockMap[targetVariant.id] : undefined;
+                        const pillOOS = targetStock !== undefined && targetStock <= 0;
+
+                        return (
+                          <button
+                            key={value}
+                            onClick={() => !pillOOS && handleVariantSelect(dimIndex, value)}
+                            disabled={pillOOS}
+                            className="px-4 py-1.5 text-sm border transition-colors"
+                            style={{
+                              borderRadius: `${(design as any).style?.cornerRadius ?? 8}px`,
+                              backgroundColor: isSelected ? design.colors.secondary : 'transparent',
+                              borderColor: isSelected ? design.colors.secondary : pillOOS ? design.colors.border : design.colors.border,
+                              color: isSelected ? '#ffffff' : pillOOS ? design.colors.border : design.colors.text,
+                              cursor: isSelected ? 'default' : pillOOS ? 'not-allowed' : 'pointer',
+                              opacity: pillOOS ? 0.4 : 1,
+                              textDecoration: pillOOS ? 'line-through' : 'none',
+                            }}
+                            title={pillOOS ? 'Out of stock' : undefined}
+                          >
+                            {value}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           <p className="text-lg mb-6 whitespace-pre-line" style={{ color: design.colors.text }}>
             {product.description}
@@ -205,16 +337,19 @@ export default function ProductPage({ params }: { params: Promise<{ productId: s
             <p className="text-sm mb-2" style={{ color: design.colors.textLight }}>
               SKU: {product.sku}
             </p>
-
             <p className="text-lg font-semibold mb-2" style={{ color: design.colors.text }}>
               Box of {product.unitsPerBox} units
             </p>
-            <p className="text-4xl font-bold mb-1" style={{ color: design.colors.secondary }}>
-              ${product.boxCost.toFixed(2)}
-            </p>
-            <p style={{ color: design.colors.textLight }}>
-              ${product.itemCost.toFixed(2)} per unit
-            </p>
+            {!pricing.hidePrices && (
+              <>
+                <p className="text-4xl font-bold mb-1" style={{ color: design.colors.secondary }}>
+                  {formatMoney(product.boxCost, pricing.currency)}
+                </p>
+                <p style={{ color: design.colors.textLight }}>
+                  {formatMoney(product.itemCost, pricing.currency)} per unit
+                </p>
+              </>
+            )}
             {stock !== null && (
               <p className="text-sm mt-2 font-semibold" style={{ color: stock > 0 ? design.colors.success : '#EF4444' }}>
                 {stock > 0 ? `${stock} in stock` : 'Out of stock'}
@@ -222,7 +357,41 @@ export default function ProductPage({ params }: { params: Promise<{ productId: s
             )}
           </div>
 
+          {/* Required PDF attachment (Details/UploadRequired.txt) */}
+          {needsUpload && (
+            <div className="mb-6 p-4 border rounded-lg" style={{ borderColor: design.colors.border }}>
+              <label htmlFor="product-pdf" className="block text-sm font-semibold mb-2" style={{ color: design.colors.text }}>
+                Attach PDF document *
+              </label>
+              <input
+                id="product-pdf"
+                type="file"
+                accept=".pdf,application/pdf"
+                onChange={(e) => handleAttachFile(e.target.files?.[0] || null)}
+                disabled={isUploading}
+                className="w-full text-sm"
+              />
+              {isUploading && (
+                <p className="text-sm mt-2" style={{ color: design.colors.textLight }}>Uploading...</p>
+              )}
+              {attachment && (
+                <p className="text-sm mt-2 font-semibold" style={{ color: design.colors.success }}>
+                  Attached: {attachment.filename}
+                </p>
+              )}
+              {uploadError && (
+                <p className="text-sm mt-2" style={{ color: '#DC2626' }}>{uploadError}</p>
+              )}
+              {!attachment && !isUploading && !uploadError && (
+                <p className="text-xs mt-2" style={{ color: design.colors.textLight }}>
+                  A PDF is required before this item can be added to the cart.
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Quantity Selector */}
+          {!needsUpload && (
           <div className="mb-6">
             <label className="block text-sm font-semibold mb-2" style={{ color: design.colors.text }}>
               Quantity (boxes):
@@ -265,35 +434,39 @@ export default function ProductPage({ params }: { params: Promise<{ productId: s
             </div>
           </div>
 
+          )}
+
           {/* Total */}
+          {!needsUpload && (
           <div className="mb-6">
-            <p className="text-sm" style={{ color: design.colors.textLight }}>
-              Total ({quantity} {quantity === 1 ? 'box' : 'boxes'}):
-            </p>
-            <p className="text-3xl font-bold" style={{ color: design.colors.primary }}>
-              ${totalPrice.toFixed(2)}
-            </p>
+            {!pricing.hidePrices && (
+              <>
+                <p className="text-sm" style={{ color: design.colors.textLight }}>
+                  Total ({quantity} {quantity === 1 ? 'box' : 'boxes'}):
+                </p>
+                <p className="text-3xl font-bold" style={{ color: design.colors.primary }}>
+                  {formatMoney(totalPrice, pricing.currency)}
+                </p>
+              </>
+            )}
             <p className="text-sm" style={{ color: design.colors.textLight }}>
               {quantity * product.unitsPerBox} total units
             </p>
           </div>
+          )}
 
-          {/* Add to Cart Button */}
+          {/* Add to Cart */}
           <button
             onClick={handleAddToCart}
-            disabled={isAdding || isOutOfStock}
+            disabled={isAdding || isOutOfStock || isUploading || (needsUpload && !attachment)}
             className="w-full py-4 rounded-lg text-white text-lg font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
             style={{ backgroundColor: isOutOfStock ? '#9CA3AF' : design.colors.secondary }}
           >
-            {isOutOfStock ? 'Out of Stock' : isAdding ? 'Adding...' : 'Add to Cart'}
+            {isOutOfStock ? 'Out of Stock' : isAdding ? 'Adding...' : needsUpload && !attachment ? 'Attach a PDF to add to cart' : 'Add to Cart'}
           </button>
 
-          {/* Success Message */}
           {showSuccess && (
-            <div
-              className="mt-4 p-4 rounded-lg text-white"
-              style={{ backgroundColor: design.colors.success }}
-            >
+            <div className="mt-4 p-4 rounded-lg text-white" style={{ backgroundColor: design.colors.success }}>
               Added to cart successfully!
             </div>
           )}

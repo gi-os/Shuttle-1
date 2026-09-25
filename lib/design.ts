@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { getPricing, type Pricing } from './presets';
 
 const DATABASE_PATH = path.join(process.cwd(), 'DATABASE');
 const DESIGN_PATH = path.join(DATABASE_PATH, 'Design');
@@ -52,6 +53,7 @@ export interface DesignData {
   faviconPath: string | null;
   heroImages: string[];
   collectionShowcaseImages: Record<string, string | null>;
+  pricing: Pricing;
 }
 
 function parseKeyValueFile(content: string): Record<string, string> {
@@ -361,5 +363,6 @@ export function getDesignData(): DesignData {
     faviconPath: getLogoPath('favicon'),
     heroImages: getHeroImages(),
     collectionShowcaseImages: getCollectionShowcaseImages(),
+    pricing: getPricing(),
   };
 }
