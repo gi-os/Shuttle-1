@@ -11,6 +11,18 @@ A static-first e-commerce storefront where everything — branding, products, co
 - **Flexible Checkout**: Support for LR Paris freight forwarder or custom freight options
 - **CSV Order Tracking**: Orders appended to `DATABASE/Orders/orders.csv`
 
+## ELC Demo Store / PO extensions
+
+This branch's `DATABASE/` is the **ELC Demo** store. See [`ELC-DEMO.md`](ELC-DEMO.md) for the layout, the new optional config flags (`UploadRequired.txt`, `HidePrices.txt`, `Currency.txt`, extended `DataRequired.txt` toggles) and Launchpad deploy steps.
+
+**Order approval hold.** Orders are written with Status `Pending`. To release one:
+
+```bash
+curl -X POST -H "x-admin-password: <secret>" <shop-url>/api/orders/<OrderID>/release
+```
+
+`<secret>` is `SHUTTLE_ADMIN_PASSWORD` (env) or, if unset, `DATABASE/Design/Details/Password.txt`. Only `Pending` orders can be released (`409` otherwise).
+
 ## Tech Stack
 
 - Next.js 15 with App Router
